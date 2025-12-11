@@ -72,7 +72,7 @@ def fg_color(val):
 # -------------------------------
 # LOAD MAIN STATS (PER GAME)
 # -------------------------------
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, ttl=3600)
 def load_main_stats(season: str) -> pd.DataFrame:
     stats = LeagueDashPlayerStats(
         season=season,
@@ -96,7 +96,7 @@ def load_main_stats(season: str) -> pd.DataFrame:
 # -------------------------------
 # LOAD SHOT DATA (BY ZONE)
 # -------------------------------
-@st.cache_data(show_spinner=True)
+
 def load_shot_data(season: str) -> pd.DataFrame:
     df = LeagueDashPlayerShotLocations(
         season=season,
@@ -357,3 +357,4 @@ with tab2:
     })
 
     st.markdown(df_out.to_html(escape=False, index=False), unsafe_allow_html=True)
+
