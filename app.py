@@ -10,6 +10,12 @@ from nba_api.stats.endpoints import (
     LeagueDashPlayerShotLocations
 )
 
+with st.sidebar:
+    if st.button("Refresh now"):
+        st.cache_data.clear()
+        st.rerun()
+
+
 # -------------------------------
 # NBA.com REQUEST HEADERS (helps reliability)
 # -------------------------------
@@ -408,3 +414,4 @@ with tab2:
     })
 
     st.markdown(df_out.to_html(escape=False, index=False), unsafe_allow_html=True)
+
