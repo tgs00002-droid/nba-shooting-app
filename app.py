@@ -1,24 +1,22 @@
 import streamlit as st
 
-# MUST be first Streamlit call
-st.set_page_config(page_title="NBA Shooting – NBA.com", layout="wide")
+# -------------------------------
+# SETTINGS (set_page_config MUST be first Streamlit call)
+# -------------------------------
+TARGET_SEASON = "2025-26"
+SEASON_LABEL = "2025-26 Regular Season"
+
+st.set_page_config(
+    page_title="NBA Shooting – NBA.com 2025-26",
+    layout="wide"
+)
 
 import pandas as pd
 import numpy as np
-import datetime as dt
-import time
-import random
-
 from nba_api.stats.endpoints import LeagueDashPlayerStats, LeagueDashPlayerShotLocations
 
 # -------------------------------
-# PAGE HEADER (renders instantly)
-# -------------------------------
-st.title("NBA Shooting – NBA.com")
-st.caption("If NBA.com is slow/blocked on Streamlit Cloud, this app loads with a fallback season. Use the sidebar buttons to refresh or detect latest season.")
-
-# -------------------------------
-# NBA.com HEADERS
+# NBA.com REQUEST HEADERS (helps reliability on Streamlit Cloud)
 # -------------------------------
 NBA_HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -27,50 +25,8 @@ NBA_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-SEASON_TYPE = "Regular Season"
-DEFAULT_FALLBACK_SEASON = "2025-26"
-
-def _pause():
-    time.sleep(0.25 + random.random() * 0.35)
-
-def with_retry(fn, tries=3, base_sleep=1.0):
-    last_err = None
-    for i in range(tries):
-        try:
-            return fn()
-        except Exception as e:
-            last_err = e
-            time.sleep(base_sleep * (i + 1))
-    raise last_err
-
-def season_str_from_year(start_year: int) -> str:
-    return f"{start_year}-{str(start_year + 1)[-2:]}"
-
-def candidate_seasons_latest_first(n_back: int = 8):
-    today = dt.date.today()
-    start_year = today.year if today.month >= 10 else today.year - 1
-    return [season_str_from_year(start_year - i) for i in range(n_back)]
-
-@st.cache_data(ttl=60 * 30, show_spinner=True)
-def safe_detect_latest_season() -> str:
-    for s in candidate_seasons_latest_first():
-        try:
-            _pause()
-            df = LeagueDashPlayerStats(
-                season=s,
-                season_type_all_star=SEASON_TYPE,
-                per_mode_detailed="Totals",
-                headers=NBA_HEADERS,
-                timeout=15,   # shorter timeout so it won’t hang forever
-            ).get_data_frames()[0]
-            if df is not None and len(df) > 0:
-                return s
-        except Exception:
-            continue
-    return DEFAULT_FALLBACK_SEASON
-
 # -------------------------------
-# TEAM LOGOS + HEADSHOTS
+# LOGO + HEADSHOT HELPERS
 # -------------------------------
 TEAM_LOGOS = {
     "ATL": "https://cdn.nba.com/logos/nba/1610612737/primary/L/logo.svg",
@@ -109,9 +65,10 @@ def get_team_logo(team):
     return TEAM_LOGOS.get(team, "")
 
 def get_headshot(player_id: int):
-    return f"https://cdn.nba.com/headshots/nba/latest/260x190/{int(player_id)}.png"
+    return f"https://cdn.nba.com/headshots/nba/latest/260x190/{player_id}.png"
 
 def fg_color(val):
+    """Color FG% cells: Red < 30, Yellow 30–40, Green > 40."""
     if pd.isna(val):
         return ""
     if val < 0.30:
@@ -121,47 +78,44 @@ def fg_color(val):
     return "background-color: green"
 
 # -------------------------------
-# LOADERS
+# LOAD MAIN STATS (PER GAME)
 # -------------------------------
-@st.cache_data(show_spinner=True, ttl=60 * 30)
+@st.cache_data(show_spinner=True, ttl=3600)
 def load_main_stats(season: str) -> pd.DataFrame:
-    def _call():
-        _pause()
-        return LeagueDashPlayerStats(
-            season=season,
-            season_type_all_star=SEASON_TYPE,
-            per_mode_detailed="Totals",
-            headers=NBA_HEADERS,
-            timeout=15,
-        ).get_data_frames()[0]
-    stats = with_retry(_call, tries=3)
+    stats = LeagueDashPlayerStats(
+        season=season,
+        season_type_all_star="Regular Season",
+        per_mode_detailed="PerGame",
+        headers=NBA_HEADERS,
+        timeout=20
+    ).get_data_frames()[0]
 
-    for c in ["GP","MIN","FGM","FGA","FG3M","FG3A","FTM","FTA","PTS","PLAYER_ID"]:
-        if c in stats.columns:
-            stats[c] = pd.to_numeric(stats[c], errors="coerce")
-
-    stats["FG_PCT"]  = np.where(stats["FGA"]  > 0, stats["FGM"]  / stats["FGA"],  np.nan)
-    stats["FG3_PCT"] = np.where(stats["FG3A"] > 0, stats["FG3M"] / stats["FG3A"], np.nan)
-    stats["FT_PCT"]  = np.where(stats["FTA"]  > 0, stats["FTM"]  / stats["FTA"],  np.nan)
-
-    stats["PTS"] = np.where(stats["GP"] > 0, stats["PTS"] / stats["GP"], np.nan)
-    stats["MIN"] = np.where(stats["GP"] > 0, stats["MIN"] / stats["GP"], np.nan)
+    numeric_cols = [
+        "GP", "MIN",
+        "FGM", "FGA", "FG_PCT",
+        "FG3M", "FG3A", "FG3_PCT",
+        "FTM", "FTA", "FT_PCT",
+        "PTS"
+    ]
+    for col in numeric_cols:
+        if col in stats.columns:
+            stats[col] = pd.to_numeric(stats[col], errors="coerce")
 
     return stats
 
-@st.cache_data(show_spinner=True, ttl=60 * 30)
+# -------------------------------
+# LOAD SHOT DATA (BY ZONE)
+# -------------------------------
+@st.cache_data(show_spinner=True, ttl=3600)
 def load_shot_data(season: str) -> pd.DataFrame:
-    def _call():
-        _pause()
-        return LeagueDashPlayerShotLocations(
-            season=season,
-            season_type_all_star=SEASON_TYPE,
-            distance_range="By Zone",
-            per_mode_detailed="PerGame",
-            headers=NBA_HEADERS,
-            timeout=15,
-        ).get_data_frames()[0]
-    df = with_retry(_call, tries=3)
+    df = LeagueDashPlayerShotLocations(
+        season=season,
+        season_type_all_star="Regular Season",
+        distance_range="By Zone",
+        per_mode_detailed="PerGame",
+        headers=NBA_HEADERS,
+        timeout=20
+    ).get_data_frames()[0]
 
     flat_cols = []
     for c in df.columns:
@@ -177,89 +131,86 @@ def load_shot_data(season: str) -> pd.DataFrame:
 
     return df
 
+# -------------------------------
+# ZONE BREAKDOWN FOR ONE PLAYER
+# -------------------------------
 def get_zones_for_player(player_name: str, shots_all: pd.DataFrame) -> pd.DataFrame:
-    if "PLAYER_NAME" not in shots_all.columns:
+    df = shots_all.copy()
+
+    if "PLAYER_NAME" not in df.columns:
         return pd.DataFrame()
 
-    df = shots_all[shots_all["PLAYER_NAME"] == player_name]
+    df = df[df["PLAYER_NAME"] == player_name]
     if df.empty:
         return pd.DataFrame()
 
     row = df.iloc[0]
-    shot_cols = [c for c in df.columns if c.endswith("_FGM") or c.endswith("_FGA") or c.endswith("_FG_PCT")]
+
+    shot_cols = [
+        c for c in df.columns
+        if c.endswith("_FGM") or c.endswith("_FGA") or c.endswith("_FG_PCT")
+    ]
 
     zone_records = {}
+
     for col in shot_cols:
         val = row[col]
-        if col.endswith("_FGM"):
+
+        if col.endswith("_FG_PCT"):
+            zone = col.replace("_FG_PCT", "")
+            metric = "FG_PCT"
+        elif col.endswith("_FGM"):
             zone = col.replace("_FGM", "")
-            zone_records.setdefault(zone, {"zone": zone, "FGM": 0.0, "FGA": 0.0})
-            if pd.notna(val):
-                zone_records[zone]["FGM"] += float(val)
-        elif col.endswith("_FGA"):
+            metric = "FGM"
+        else:
             zone = col.replace("_FGA", "")
-            zone_records.setdefault(zone, {"zone": zone, "FGM": 0.0, "FGA": 0.0})
-            if pd.notna(val):
-                zone_records[zone]["FGA"] += float(val)
+            metric = "FGA"
+
+        rec = zone_records.setdefault(zone, {
+            "zone": zone,
+            "FGM": 0.0,
+            "FGA": 0.0,
+            "FG_PCT": np.nan
+        })
+
+        if metric in ["FGM", "FGA"] and pd.notna(val):
+            rec[metric] += float(val)
+        elif metric == "FG_PCT" and pd.notna(val):
+            rec["FG_PCT"] = float(val)
 
     zp = pd.DataFrame(zone_records.values())
-    if zp.empty:
-        return zp
-
     zp = zp[zp["zone"] != "Backcourt"].copy()
 
-    # FG% = NA if FGA=0
-    zp["FG_PCT"] = np.where(zp["FGA"] > 0, zp["FGM"] / zp["FGA"], np.nan)
+    total_fga = zp["FGA"].sum()
 
     zp["pts_val"] = np.where(zp["zone"].str.contains("3"), 3, 2)
     zp["PTS"] = zp["FGM"] * zp["pts_val"]
     zp["PTS_per_shot"] = np.where(zp["FGA"] > 0, zp["PTS"] / zp["FGA"], np.nan)
-
-    total_fga = zp["FGA"].sum()
     zp["Shot Share"] = np.where(total_fga > 0, zp["FGA"] / total_fga, np.nan)
 
     return zp
 
 # -------------------------------
-# SEASON CHOICE (does NOT block startup)
-# -------------------------------
-if "season" not in st.session_state:
-    st.session_state["season"] = DEFAULT_FALLBACK_SEASON
-
-with st.sidebar:
-    st.subheader("Controls")
-
-    if st.button("Refresh now"):
-        st.cache_data.clear()
-        st.rerun()
-
-    if st.button("Use latest season"):
-        st.session_state["season"] = safe_detect_latest_season()
-        st.cache_data.clear()
-        st.rerun()
-
-    TARGET_SEASON = st.session_state["season"]
-    st.write(f"Season: **{TARGET_SEASON}**")
-    st.write(f"{TARGET_SEASON} {SEASON_TYPE}")
-
-st.markdown("---")
-
-# -------------------------------
-# LOAD DATA SAFELY (no white screen)
+# LOAD DATA (safe error instead of blank screen)
 # -------------------------------
 try:
     stats_all = load_main_stats(TARGET_SEASON)
     shots_all = load_shot_data(TARGET_SEASON)
 except Exception as e:
-    st.error("NBA.com blocked the request or timed out. Click Refresh now or try later.")
+    st.error("NBA.com blocked or timed out. Refresh and try again.")
     st.exception(e)
     st.stop()
 
 # -------------------------------
-# FILTERS
+# SIDEBAR – TEAM & PLAYER SELECT
 # -------------------------------
 teams = ["All"] + sorted(stats_all["TEAM_ABBREVIATION"].dropna().unique())
+
 with st.sidebar:
+    if st.button("Refresh now"):
+        st.cache_data.clear()
+        st.rerun()
+
     team_sel = st.selectbox("Choose a team:", teams)
 
     if team_sel != "All":
@@ -270,35 +221,45 @@ with st.sidebar:
     if team_sel == "All":
         players = sorted(stats_all["PLAYER_NAME"].dropna().unique())
     else:
-        players = sorted(stats_all[stats_all["TEAM_ABBREVIATION"] == team_sel]["PLAYER_NAME"].dropna().unique())
-
-    if not players:
-        st.error("No players loaded. Try Refresh now.")
-        st.stop()
+        players = sorted(
+            stats_all[stats_all["TEAM_ABBREVIATION"] == team_sel]["PLAYER_NAME"].dropna().unique()
+        )
 
     player_sel = st.selectbox("Choose a player:", players)
+
+    st.markdown("---")
+    st.write("Stats: NBA.com Shooting General (Per Game)")
+    st.write("Zones: NBA.com Shooting Dashboard (By Zone)")
+    st.write(SEASON_LABEL)
 
 # -------------------------------
 # PLAYER HEADER
 # -------------------------------
-p_rows = stats_all[stats_all["PLAYER_NAME"] == player_sel]
+if team_sel == "All":
+    p_rows = stats_all[stats_all["PLAYER_NAME"] == player_sel]
+else:
+    p_rows = stats_all[
+        (stats_all["PLAYER_NAME"] == player_sel) &
+        (stats_all["TEAM_ABBREVIATION"] == team_sel)
+    ]
+
 if p_rows.empty:
-    st.error("Player not found.")
-    st.stop()
+    p_rows = stats_all[stats_all["PLAYER_NAME"] == player_sel]
 
 player_row = p_rows.iloc[0]
 
-st.subheader(f"{player_sel} ({player_row['TEAM_ABBREVIATION']}) – {TARGET_SEASON} {SEASON_TYPE}")
+st.title("NBA Shooting – NBA.com 2025-26")
 
-c1, c2 = st.columns([1, 4])
+col1, col2 = st.columns([1, 4])
 
-with c1:
+with col1:
     st.image(get_headshot(player_row["PLAYER_ID"]), width=170)
     logo_url = get_team_logo(player_row["TEAM_ABBREVIATION"])
     if logo_url:
         st.image(logo_url, width=90)
 
-with c2:
+with col2:
+    st.subheader(f"{player_sel} ({player_row['TEAM_ABBREVIATION']}) – {SEASON_LABEL}")
     st.write(
         f"GP: **{int(player_row['GP'])}**  |  "
         f"PTS: **{player_row['PTS']:.1f}** per game  |  "
@@ -310,8 +271,12 @@ with c2:
 
 st.markdown("---")
 
+# -------------------------------
+# TABS
+# -------------------------------
 tab1, tab2 = st.tabs(["Zone breakdown", "Team overview"])
 
+# ----- TAB 1: ZONE BREAKDOWN -----
 with tab1:
     zp = get_zones_for_player(player_sel, shots_all)
 
@@ -319,6 +284,7 @@ with tab1:
         st.error("No zone data available for this player.")
     else:
         df_zone = zp.copy()
+
         df_zone["Zone"] = (
             df_zone["zone"]
             .str.replace("_", " ", regex=False)
@@ -328,7 +294,6 @@ with tab1:
         df_zone = df_zone[["Zone", "FGM", "FGA", "PTS_per_shot", "FG_PCT", "PTS", "Shot Share"]].copy()
         df_zone.rename(columns={"PTS_per_shot": "PTS/shot", "FG_PCT": "FG%"}, inplace=True)
 
-        # FT row
         df_zone["FTM"] = np.nan
         df_zone["FTA"] = np.nan
         df_zone["FT%"] = np.nan
@@ -341,12 +306,17 @@ with tab1:
             "FG%": np.nan,
             "PTS": np.nan,
             "Shot Share": np.nan,
-            "FTM": (player_row["FTM"] / player_row["GP"]) if player_row["GP"] > 0 else np.nan,
-            "FTA": (player_row["FTA"] / player_row["GP"]) if player_row["GP"] > 0 else np.nan,
+            "FTM": player_row["FTM"],
+            "FTA": player_row["FTA"],
             "FT%": player_row["FT_PCT"],
         }
 
         df_zone = pd.concat([df_zone, pd.DataFrame([ft_row])], ignore_index=True)
+
+        df_zone = df_zone[[
+            "Zone", "FGM", "FGA", "PTS/shot", "FG%", "PTS", "Shot Share",
+            "FTM", "FTA", "FT%"
+        ]]
 
         styled = (
             df_zone.style
@@ -366,6 +336,7 @@ with tab1:
 
         st.dataframe(styled, use_container_width=True)
 
+# ----- TAB 2: TEAM OVERVIEW -----
 with tab2:
     if team_sel == "All":
         team_df = stats_all.copy()
