@@ -1,19 +1,70 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import datetime as dt
+import time
+import random
+
 from nba_api.stats.endpoints import (
     LeagueDashPlayerStats,
     LeagueDashPlayerShotLocations
 )
 
 # -------------------------------
-# SETTINGS
+# NBA.com REQUEST HEADERS (helps reliability)
 # -------------------------------
-TARGET_SEASON = "2025-26"
-SEASON_LABEL = "2025-26 Regular Season"
+NBA_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://www.nba.com/",
+    "Origin": "https://www.nba.com",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+SEASON_TYPE = "Regular Season"   # keep your app as regular season
+PER_MODE = "PerGame"             # keep your app per game
+
+def _pause():
+    time.sleep(0.35 + random.random() * 0.45)
+
+def season_str_from_year(start_year: int) -> str:
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+def candidate_seasons_latest_first(n_back: int = 8):
+    today = dt.date.today()
+    # If it's before Oct, NBA season context usually still "previous start year"
+    start_year = today.year if today.month >= 10 else today.year - 1
+    return [season_str_from_year(start_year - i) for i in range(n_back)]
+
+def _try_fetch_players(season: str) -> pd.DataFrame:
+    _pause()
+    return LeagueDashPlayerStats(
+        season=season,
+        season_type_all_star=SEASON_TYPE,
+        per_mode_detailed=PER_MODE,
+        headers=NBA_HEADERS,
+        timeout=30,
+    ).get_data_frames()[0]
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)  # refresh every 30 minutes
+def detect_latest_season() -> str:
+    for s in candidate_seasons_latest_first():
+        try:
+            df = _try_fetch_players(s)
+            if df is not None and len(df) > 0:
+                return s
+        except Exception:
+            continue
+    # fallback
+    return candidate_seasons_latest_first()[-1]
+
+# -------------------------------
+# SETTINGS (AUTO LATEST SEASON)
+# -------------------------------
+TARGET_SEASON = detect_latest_season()
+SEASON_LABEL = f"{TARGET_SEASON} {SEASON_TYPE}"
 
 st.set_page_config(
-    page_title="NBA Shooting – NBA.com 2025-26",
+    page_title=f"NBA Shooting – NBA.com ({TARGET_SEASON})",
     layout="wide"
 )
 
@@ -57,7 +108,7 @@ def get_team_logo(team):
     return TEAM_LOGOS.get(team, "")
 
 def get_headshot(player_id: int):
-    return f"https://cdn.nba.com/headshots/nba/latest/260x190/{player_id}.png"
+    return f"https://cdn.nba.com/headshots/nba/latest/260x190/{int(player_id)}.png"
 
 def fg_color(val):
     """Color FG% cells: Red < 30, Yellow 30–40, Green > 40."""
@@ -72,12 +123,14 @@ def fg_color(val):
 # -------------------------------
 # LOAD MAIN STATS (PER GAME)
 # -------------------------------
-@st.cache_data(show_spinner=True, ttl=3600)
+@st.cache_data(show_spinner=True, ttl=60 * 30)  # refresh every 30 minutes
 def load_main_stats(season: str) -> pd.DataFrame:
     stats = LeagueDashPlayerStats(
         season=season,
-        season_type_all_star="Regular Season",
-        per_mode_detailed="PerGame"
+        season_type_all_star=SEASON_TYPE,
+        per_mode_detailed=PER_MODE,
+        headers=NBA_HEADERS,
+        timeout=30,
     ).get_data_frames()[0]
 
     numeric_cols = [
@@ -96,13 +149,16 @@ def load_main_stats(season: str) -> pd.DataFrame:
 # -------------------------------
 # LOAD SHOT DATA (BY ZONE)
 # -------------------------------
-
+@st.cache_data(show_spinner=True, ttl=60 * 30)  # refresh every 30 minutes
 def load_shot_data(season: str) -> pd.DataFrame:
+    _pause()
     df = LeagueDashPlayerShotLocations(
         season=season,
-        season_type_all_star="Regular Season",
+        season_type_all_star=SEASON_TYPE,
         distance_range="By Zone",
-        per_mode_detailed="PerGame"
+        per_mode_detailed=PER_MODE,
+        headers=NBA_HEADERS,
+        timeout=30,
     ).get_data_frames()[0]
 
     # flatten any tuple / MultiIndex columns
@@ -194,9 +250,10 @@ shots_all = load_shot_data(TARGET_SEASON)
 teams = ["All"] + sorted(stats_all["TEAM_ABBREVIATION"].unique())
 
 with st.sidebar:
+    st.subheader("Filters")
+    st.write(f"Season auto-detected: **{TARGET_SEASON}**")
     team_sel = st.selectbox("Choose a team:", teams)
 
-    # show team logo under the dropdown (except for All)
     if team_sel != "All":
         logo_url_sb = get_team_logo(team_sel)
         if logo_url_sb:
@@ -231,7 +288,7 @@ if p_rows.empty:
 
 player_row = p_rows.iloc[0]
 
-st.title("NBA Shooting – NBA.com 2025-26")
+st.title(f"NBA Shooting – NBA.com ({TARGET_SEASON})")
 
 col1, col2 = st.columns([1, 4])
 
@@ -268,14 +325,12 @@ with tab1:
     else:
         df_zone = zp.copy()
 
-        # clean zone labels
         df_zone["Zone"] = (
             df_zone["zone"]
             .str.replace("_", " ", regex=False)
             .str.replace("Non RA", "(Non-RA)", regex=False)
         )
 
-        # base shooting columns
         df_zone = df_zone[["Zone", "FGM", "FGA", "PTS_per_shot", "FG_PCT", "PTS", "Shot Share"]].copy()
         df_zone.rename(
             columns={
@@ -285,18 +340,16 @@ with tab1:
             inplace=True
         )
 
-        # add FT stats columns (empty for regular zones)
         df_zone["FTM"] = np.nan
         df_zone["FTA"] = np.nan
         df_zone["FT%"] = np.nan
 
-        # add Free Throw row with real FT numbers
         ft_row = {
             "Zone": "Free Throw",
             "FGM": np.nan,
             "FGA": np.nan,
             "PTS/shot": np.nan,
-            "FG%": np.nan,  # keep NaN so no color
+            "FG%": np.nan,
             "PTS": np.nan,
             "Shot Share": np.nan,
             "FTM": player_row["FTM"],
@@ -305,16 +358,14 @@ with tab1:
         }
         df_zone = pd.concat([df_zone, pd.DataFrame([ft_row])], ignore_index=True)
 
-        # order columns nicely
         df_zone = df_zone[[
             "Zone", "FGM", "FGA", "PTS/shot", "FG%", "PTS", "Shot Share",
             "FTM", "FTA", "FT%"
         ]]
 
-        # style + format numbers
         styled = (
             df_zone.style
-            .applymap(fg_color, subset=["FG%"])  # FT row has FG% = NaN → no color
+            .applymap(fg_color, subset=["FG%"])
             .format({
                 "FGM": lambda v: "" if pd.isna(v) else f"{v:.1f}",
                 "FGA": lambda v: "" if pd.isna(v) else f"{v:.1f}",
@@ -357,4 +408,3 @@ with tab2:
     })
 
     st.markdown(df_out.to_html(escape=False, index=False), unsafe_allow_html=True)
-
