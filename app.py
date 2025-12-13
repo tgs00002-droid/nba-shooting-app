@@ -1,10 +1,8 @@
+import time
 import streamlit as st
 import pandas as pd
 import numpy as np
-from nba_api.stats.endpoints import (
-    LeagueDashPlayerStats,
-    LeagueDashPlayerShotLocations
-)
+from nba_api.stats.endpoints import LeagueDashPlayerStats, LeagueDashPlayerShotLocations
 
 # -------------------------------
 # SETTINGS
@@ -12,13 +10,31 @@ from nba_api.stats.endpoints import (
 TARGET_SEASON = "2025-26"
 SEASON_LABEL = "2025-26 Regular Season"
 
+# How often the app should re-pull data from NBA API (seconds)
+# 60 = every minute, 300 = every 5 minutes
+CACHE_TTL_SECONDS = 300
+
 st.set_page_config(
     page_title="NBA Shooting – NBA.com 2025-26",
     layout="wide"
 )
 
+# OPTIONAL: auto-refresh the page while user is viewing it
+# If you want this, add "streamlit-autorefresh" to requirements.txt
+# and uncomment the 2 lines below:
+# from streamlit_autorefresh import st_autorefresh
+# st_autorefresh(interval=60_000, key="autorefresh")  # 60 seconds
+
 # -------------------------------
-# LOGO + HEADSHOT HELPERS
+# SIDEBAR: FORCE REFRESH BUTTON
+# -------------------------------
+with st.sidebar:
+    if st.button("🔄 Refresh data now (pull latest)"):
+        st.cache_data.clear()
+        st.rerun()
+
+# -------------------------------
+# TEAM LOGOS + HEADSHOTS
 # -------------------------------
 TEAM_LOGOS = {
     "ATL": "https://cdn.nba.com/logos/nba/1610612737/primary/L/logo.svg",
@@ -61,24 +77,44 @@ def get_headshot(player_id: int):
 
 def fg_color(val):
     """Color FG% cells: Red < 30, Yellow 30–40, Green > 40."""
-    if pd.isna(val):
+    if val is None or (isinstance(val, float) and np.isnan(val)):
         return ""
-    if val < 0.30:
-        return "background-color: red"
-    if val < 0.40:
-        return "background-color: yellow"
-    return "background-color: green"
+    try:
+        v = float(val)
+    except Exception:
+        return ""
+    if v < 0.30:
+        return "background-color: #ff4d4d"
+    if v < 0.40:
+        return "background-color: #ffe066"
+    return "background-color: #69db7c"
+
+# -------------------------------
+# NBA API RELIABILITY (RETRIES)
+# -------------------------------
+def nba_call_with_retries(fn, tries=3, base_sleep=1.5):
+    last_err = None
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            time.sleep(base_sleep * (i + 1))
+    raise last_err
 
 # -------------------------------
 # LOAD MAIN STATS (PER GAME)
 # -------------------------------
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, ttl=CACHE_TTL_SECONDS)
 def load_main_stats(season: str) -> pd.DataFrame:
-    stats = LeagueDashPlayerStats(
-        season=season,
-        season_type_all_star="Regular Season",
-        per_mode_detailed="PerGame"
-    ).get_data_frames()[0]
+    def _call():
+        return LeagueDashPlayerStats(
+            season=season,
+            season_type_all_star="Regular Season",
+            per_mode_detailed="PerGame"
+        ).get_data_frames()[0]
+
+    stats = nba_call_with_retries(_call)
 
     numeric_cols = [
         "GP", "MIN",
@@ -96,14 +132,17 @@ def load_main_stats(season: str) -> pd.DataFrame:
 # -------------------------------
 # LOAD SHOT DATA (BY ZONE)
 # -------------------------------
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, ttl=CACHE_TTL_SECONDS)
 def load_shot_data(season: str) -> pd.DataFrame:
-    df = LeagueDashPlayerShotLocations(
-        season=season,
-        season_type_all_star="Regular Season",
-        distance_range="By Zone",
-        per_mode_detailed="PerGame"
-    ).get_data_frames()[0]
+    def _call():
+        return LeagueDashPlayerShotLocations(
+            season=season,
+            season_type_all_star="Regular Season",
+            distance_range="By Zone",
+            per_mode_detailed="PerGame"
+        ).get_data_frames()[0]
+
+    df = nba_call_with_retries(_call)
 
     # flatten any tuple / MultiIndex columns
     flat_cols = []
@@ -183,30 +222,35 @@ def get_zones_for_player(player_name: str, shots_all: pd.DataFrame) -> pd.DataFr
     return zp
 
 # -------------------------------
-# LOAD DATA
+# LOAD DATA (FRESH PER TTL / REFRESH BUTTON)
 # -------------------------------
-stats_all = load_main_stats(TARGET_SEASON)
-shots_all = load_shot_data(TARGET_SEASON)
+try:
+    stats_all = load_main_stats(TARGET_SEASON)
+    shots_all = load_shot_data(TARGET_SEASON)
+except Exception as e:
+    st.error("NBA API failed to load. Try refresh, or wait a minute and try again.")
+    st.exception(e)
+    st.stop()
 
 # -------------------------------
 # SIDEBAR – TEAM & PLAYER SELECT
 # -------------------------------
-teams = ["All"] + sorted(stats_all["TEAM_ABBREVIATION"].unique())
+teams = ["All"] + sorted(stats_all["TEAM_ABBREVIATION"].dropna().unique())
 
 with st.sidebar:
+    st.markdown("### Filters")
     team_sel = st.selectbox("Choose a team:", teams)
 
-    # show team logo under the dropdown (except for All)
     if team_sel != "All":
         logo_url_sb = get_team_logo(team_sel)
         if logo_url_sb:
             st.image(logo_url_sb, width=70)
 
     if team_sel == "All":
-        players = sorted(stats_all["PLAYER_NAME"].unique())
+        players = sorted(stats_all["PLAYER_NAME"].dropna().unique())
     else:
         players = sorted(
-            stats_all[stats_all["TEAM_ABBREVIATION"] == team_sel]["PLAYER_NAME"].unique()
+            stats_all[stats_all["TEAM_ABBREVIATION"] == team_sel]["PLAYER_NAME"].dropna().unique()
         )
 
     player_sel = st.selectbox("Choose a player:", players)
@@ -215,6 +259,7 @@ with st.sidebar:
     st.write("Stats: NBA.com Shooting General (Per Game)")
     st.write("Zones: NBA.com Shooting Dashboard (By Zone)")
     st.write(SEASON_LABEL)
+    st.caption(f"Auto-updates every {CACHE_TTL_SECONDS//60} min (or press Refresh).")
 
 # -------------------------------
 # PLAYER HEADER
@@ -236,7 +281,7 @@ st.title("NBA Shooting – NBA.com 2025-26")
 col1, col2 = st.columns([1, 4])
 
 with col1:
-    st.image(get_headshot(player_row["PLAYER_ID"]), width=170)
+    st.image(get_headshot(int(player_row["PLAYER_ID"])), width=170)
     logo_url = get_team_logo(player_row["TEAM_ABBREVIATION"])
     if logo_url:
         st.image(logo_url, width=90)
@@ -268,35 +313,26 @@ with tab1:
     else:
         df_zone = zp.copy()
 
-        # clean zone labels
         df_zone["Zone"] = (
             df_zone["zone"]
             .str.replace("_", " ", regex=False)
             .str.replace("Non RA", "(Non-RA)", regex=False)
         )
 
-        # base shooting columns
         df_zone = df_zone[["Zone", "FGM", "FGA", "PTS_per_shot", "FG_PCT", "PTS", "Shot Share"]].copy()
-        df_zone.rename(
-            columns={
-                "PTS_per_shot": "PTS/shot",
-                "FG_PCT": "FG%",
-            },
-            inplace=True
-        )
+        df_zone.rename(columns={"PTS_per_shot": "PTS/shot", "FG_PCT": "FG%"}, inplace=True)
 
-        # add FT stats columns (empty for regular zones)
+        # add FT stats columns
         df_zone["FTM"] = np.nan
         df_zone["FTA"] = np.nan
         df_zone["FT%"] = np.nan
 
-        # add Free Throw row with real FT numbers
         ft_row = {
             "Zone": "Free Throw",
             "FGM": np.nan,
             "FGA": np.nan,
             "PTS/shot": np.nan,
-            "FG%": np.nan,  # keep NaN so no color
+            "FG%": np.nan,
             "PTS": np.nan,
             "Shot Share": np.nan,
             "FTM": player_row["FTM"],
@@ -305,20 +341,18 @@ with tab1:
         }
         df_zone = pd.concat([df_zone, pd.DataFrame([ft_row])], ignore_index=True)
 
-        # order columns nicely
         df_zone = df_zone[[
             "Zone", "FGM", "FGA", "PTS/shot", "FG%", "PTS", "Shot Share",
             "FTM", "FTA", "FT%"
         ]]
 
-        # style + format numbers
         styled = (
             df_zone.style
-            .applymap(fg_color, subset=["FG%"])  # FT row has FG% = NaN → no color
+            .applymap(fg_color, subset=["FG%"])
             .format({
                 "FGM": lambda v: "" if pd.isna(v) else f"{v:.1f}",
                 "FGA": lambda v: "" if pd.isna(v) else f"{v:.1f}",
-                "PTS/shot": lambda v: "" if pd.isna(v) else f"{v:.1f}",
+                "PTS/shot": lambda v: "" if pd.isna(v) else f"{v:.2f}",
                 "PTS": lambda v: "" if pd.isna(v) else f"{v:.1f}",
                 "FG%": lambda v: "" if pd.isna(v) else f"{int(round(v * 100))}%",
                 "Shot Share": lambda v: "" if pd.isna(v) else f"{int(round(v * 100))}%",
@@ -328,6 +362,7 @@ with tab1:
             })
         )
 
+        # Streamlit supports Styler in dataframe in most cases
         st.dataframe(styled, use_container_width=True)
 
 # ----- TAB 2: TEAM OVERVIEW -----
@@ -339,21 +374,18 @@ with tab2:
 
     team_df = team_df.sort_values("PTS", ascending=False)
 
-    logos = [
-        f'<img src="{get_team_logo(t)}" height="28">' if get_team_logo(t) else ""
-        for t in team_df["TEAM_ABBREVIATION"]
-    ]
+    df_out = team_df[[
+        "PLAYER_NAME", "TEAM_ABBREVIATION", "GP", "MIN", "PTS", "FG_PCT", "FG3_PCT", "FT_PCT"
+    ]].copy()
 
-    df_out = pd.DataFrame({
-        "Logo": logos,
-        "Player": team_df["PLAYER_NAME"],
-        "Team": team_df["TEAM_ABBREVIATION"],
-        "GP": team_df["GP"].astype(int),
-        "MIN": team_df["MIN"].round(1),
-        "PTS": team_df["PTS"].round(1),
-        "FG%": (team_df["FG_PCT"] * 100).round(1),
-        "3P%": (team_df["FG3_PCT"] * 100).round(1),
-        "FT%": (team_df["FT_PCT"] * 100).round(1),
-    })
+    df_out["GP"] = df_out["GP"].astype("Int64")
+    df_out["MIN"] = df_out["MIN"].round(1)
+    df_out["PTS"] = df_out["PTS"].round(1)
+    df_out["FG%"] = (df_out["FG_PCT"] * 100).round(1)
+    df_out["3P%"] = (df_out["FG3_PCT"] * 100).round(1)
+    df_out["FT%"] = (df_out["FT_PCT"] * 100).round(1)
 
-    st.markdown(df_out.to_html(escape=False, index=False), unsafe_allow_html=True)
+    df_out.drop(columns=["FG_PCT", "FG3_PCT", "FT_PCT"], inplace=True)
+    df_out.rename(columns={"PLAYER_NAME": "Player", "TEAM_ABBREVIATION": "Team"}, inplace=True)
+
+    st.dataframe(df_out, use_container_width=True, hide_index=True)
