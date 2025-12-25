@@ -19,11 +19,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# OPTIONAL: auto-refresh the page while user is viewing it
-# If you want this, add "streamlit-autorefresh" to requirements.txt
-# and uncomment the 2 lines below:
-# from streamlit_autorefresh import st_autorefresh
-# st_autorefresh(interval=60_000, key="autorefresh")  # 60 seconds
+
 
 # -------------------------------
 # SIDEBAR: FORCE REFRESH BUTTON
@@ -389,4 +385,5 @@ with tab2:
     df_out.rename(columns={"PLAYER_NAME": "Player", "TEAM_ABBREVIATION": "Team"}, inplace=True)
 
     st.dataframe(df_out, use_container_width=True, hide_index=True)
+
 
