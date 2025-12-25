@@ -29,7 +29,7 @@ st.set_page_config(
 # SIDEBAR: FORCE REFRESH BUTTON
 # -------------------------------
 with st.sidebar:
-    if st.button("🔄 Refresh data now (pull latest)"):
+    if st.button(" Refresh data now (pull latest)"):
         st.cache_data.clear()
         st.rerun()
 
@@ -389,3 +389,4 @@ with tab2:
     df_out.rename(columns={"PLAYER_NAME": "Player", "TEAM_ABBREVIATION": "Team"}, inplace=True)
 
     st.dataframe(df_out, use_container_width=True, hide_index=True)
+
