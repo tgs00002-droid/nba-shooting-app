@@ -2,16 +2,14 @@ import time
 import streamlit as st
 import pandas as pd
 import numpy as np
-from nba_api.stats.endpoints import (
-    LeagueDashPlayerStats,
-    LeagueDashPlayerShotLocations
-)
+from nba_api.stats.endpoints import LeagueDashPlayerStats, LeagueDashPlayerShotLocations
 
 # -------------------------------
 # SETTINGS
 # -------------------------------
 TARGET_SEASON = "2025-26"
 SEASON_LABEL = "2025-26 Regular Season"
+
 CACHE_TTL_SECONDS = 300
 
 st.set_page_config(
@@ -70,7 +68,6 @@ def get_headshot(player_id: int):
     return f"https://cdn.nba.com/headshots/nba/latest/260x190/{player_id}.png"
 
 def fg_color(val):
-    """Color FG% cells."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return ""
     v = float(val)
@@ -81,7 +78,7 @@ def fg_color(val):
     return "background-color: #69db7c"
 
 # -------------------------------
-# NBA API RELIABILITY
+# NBA API RELIABILITY (RETRIES)
 # -------------------------------
 def nba_call_with_retries(fn, tries=3, base_sleep=1.5):
     last_err = None
@@ -94,7 +91,7 @@ def nba_call_with_retries(fn, tries=3, base_sleep=1.5):
     raise last_err
 
 # -------------------------------
-# LOAD MAIN STATS
+# LOAD MAIN STATS (PER GAME)
 # -------------------------------
 @st.cache_data(show_spinner=True, ttl=CACHE_TTL_SECONDS)
 def load_main_stats(season: str) -> pd.DataFrame:
@@ -112,14 +109,14 @@ def load_main_stats(season: str) -> pd.DataFrame:
         "FG3M","FG3A","FG3_PCT",
         "FTM","FTA","FT_PCT","PTS"
     ]
-    for c in numeric_cols:
-        if c in stats.columns:
-            stats[c] = pd.to_numeric(stats[c], errors="coerce")
+    for col in numeric_cols:
+        if col in stats.columns:
+            stats[col] = pd.to_numeric(stats[col], errors="coerce")
 
     return stats
 
 # -------------------------------
-# LOAD SHOT DATA
+# LOAD SHOT DATA (BY ZONE)
 # -------------------------------
 @st.cache_data(show_spinner=True, ttl=CACHE_TTL_SECONDS)
 def load_shot_data(season: str) -> pd.DataFrame:
@@ -134,7 +131,7 @@ def load_shot_data(season: str) -> pd.DataFrame:
     df = nba_call_with_retries(_call)
 
     df.columns = [
-        "_".join(c) if isinstance(c, tuple) else c
+        "_".join([str(x) for x in c if x]) if isinstance(c, tuple) else str(c)
         for c in df.columns
     ]
 
@@ -145,76 +142,25 @@ def load_shot_data(season: str) -> pd.DataFrame:
     return df
 
 # -------------------------------
-# PLAYER ZONE BREAKDOWN
+# ZONE BREAKDOWN TAB
 # -------------------------------
-def get_zones_for_player(player_name: str, shots_all: pd.DataFrame) -> pd.DataFrame:
-    df = shots_all[shots_all["PLAYER_NAME"] == player_name]
-    if df.empty:
-        return pd.DataFrame()
-
-    row = df.iloc[0]
-    zones = {}
-
-    for col, val in row.items():
-        if not col.endswith(("FGM", "FGA", "FG_PCT")):
-            continue
-
-        zone = col.replace("_FGM", "").replace("_FGA", "").replace("_FG_PCT", "")
-        rec = zones.setdefault(zone, {"zone": zone, "FGM":0,"FGA":0,"FG_PCT":np.nan})
-
-        if col.endswith("FGM") and pd.notna(val):
-            rec["FGM"] += val
-        elif col.endswith("FGA") and pd.notna(val):
-            rec["FGA"] += val
-        elif col.endswith("FG_PCT"):
-            rec["FG_PCT"] = val
-
-    zp = pd.DataFrame(zones.values())
-    zp = zp[zp["zone"] != "Backcourt"]
-
-    zp["PTS"] = zp["FGM"] * np.where(zp["zone"].str.contains("3"),3,2)
-    zp["PTS/shot"] = zp["PTS"] / zp["FGA"]
-    zp["Shot Share"] = zp["FGA"] / zp["FGA"].sum()
-
-    return zp
-
-# -------------------------------
-# LOAD DATA
-# -------------------------------
-stats_all = load_main_stats(TARGET_SEASON)
-shots_all = load_shot_data(TARGET_SEASON)
-
-# -------------------------------
-# SIDEBAR FILTERS
-# -------------------------------
-teams = ["All"] + sorted(stats_all["TEAM_ABBREVIATION"].dropna().unique())
-team_sel = st.sidebar.selectbox("Team", teams)
-
-players = stats_all[
-    stats_all["TEAM_ABBREVIATION"].eq(team_sel) | (team_sel == "All")
-]["PLAYER_NAME"].unique()
-
-player_sel = st.sidebar.selectbox("Player", sorted(players))
-
-player_row = stats_all[stats_all["PLAYER_NAME"]==player_sel].iloc[0]
-
-# -------------------------------
-# MAIN VIEW
-# -------------------------------
-st.title("NBA Shooting – 2025‑26")
-
-zones = get_zones_for_player(player_sel, shots_all)
-
 styled = (
-    zones.style
-    .map(fg_color, subset=["FG_PCT"])
+    df_zone.style
+    .map(fg_color, subset=["FG%"])   # ✅ FIXED LINE
     .format({
-        "FG_PCT": lambda v: f"{v*100:.0f}%",
-        "Shot Share": lambda v: f"{v*100:.0f}%",
-        "PTS": "{:.1f}",
-        "PTS/shot": "{:.2f}"
+        "FGM": lambda v: "" if pd.isna(v) else f"{v:.1f}",
+        "FGA": lambda v: "" if pd.isna(v) else f"{v:.1f}",
+        "PTS/shot": lambda v: "" if pd.isna(v) else f"{v:.2f}",
+        "PTS": lambda v: "" if pd.isna(v) else f"{v:.1f}",
+        "FG%": lambda v: "" if pd.isna(v) else f"{int(round(v * 100))}%",
+        "Shot Share": lambda v: "" if pd.isna(v) else f"{int(round(v * 100))}%",
+        "FTM": lambda v: "" if pd.isna(v) else f"{v:.1f}",
+        "FTA": lambda v: "" if pd.isna(v) else f"{v:.1f}",
+        "FT%": lambda v: "" if pd.isna(v) else f"{int(round(v * 100))}%",
     })
 )
+
+st.dataframe(styled, use_container_width=True)
 
 st.dataframe(styled, use_container_width=True)
 ``
