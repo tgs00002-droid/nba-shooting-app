@@ -2,24 +2,22 @@ import time
 import streamlit as st
 import pandas as pd
 import numpy as np
-from nba_api.stats.endpoints import LeagueDashPlayerStats, LeagueDashPlayerShotLocations
+from nba_api.stats.endpoints import (
+    LeagueDashPlayerStats,
+    LeagueDashPlayerShotLocations
+)
 
 # -------------------------------
 # SETTINGS
 # -------------------------------
 TARGET_SEASON = "2025-26"
 SEASON_LABEL = "2025-26 Regular Season"
-
-# How often the app should re-pull data from NBA API (seconds)
-# 60 = every minute, 300 = every 5 minutes
 CACHE_TTL_SECONDS = 300
 
 st.set_page_config(
     page_title="NBA Shooting – NBA.com 2025-26",
     layout="wide"
 )
-
-
 
 # -------------------------------
 # SIDEBAR: FORCE REFRESH BUTTON
@@ -72,13 +70,10 @@ def get_headshot(player_id: int):
     return f"https://cdn.nba.com/headshots/nba/latest/260x190/{player_id}.png"
 
 def fg_color(val):
-    """Color FG% cells: Red < 30, Yellow 30–40, Green > 40."""
+    """Color FG% cells."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return ""
-    try:
-        v = float(val)
-    except Exception:
-        return ""
+    v = float(val)
     if v < 0.30:
         return "background-color: #ff4d4d"
     if v < 0.40:
@@ -86,7 +81,7 @@ def fg_color(val):
     return "background-color: #69db7c"
 
 # -------------------------------
-# NBA API RELIABILITY (RETRIES)
+# NBA API RELIABILITY
 # -------------------------------
 def nba_call_with_retries(fn, tries=3, base_sleep=1.5):
     last_err = None
@@ -99,7 +94,7 @@ def nba_call_with_retries(fn, tries=3, base_sleep=1.5):
     raise last_err
 
 # -------------------------------
-# LOAD MAIN STATS (PER GAME)
+# LOAD MAIN STATS
 # -------------------------------
 @st.cache_data(show_spinner=True, ttl=CACHE_TTL_SECONDS)
 def load_main_stats(season: str) -> pd.DataFrame:
@@ -113,20 +108,18 @@ def load_main_stats(season: str) -> pd.DataFrame:
     stats = nba_call_with_retries(_call)
 
     numeric_cols = [
-        "GP", "MIN",
-        "FGM", "FGA", "FG_PCT",
-        "FG3M", "FG3A", "FG3_PCT",
-        "FTM", "FTA", "FT_PCT",
-        "PTS"
+        "GP","MIN","FGM","FGA","FG_PCT",
+        "FG3M","FG3A","FG3_PCT",
+        "FTM","FTA","FT_PCT","PTS"
     ]
-    for col in numeric_cols:
-        if col in stats.columns:
-            stats[col] = pd.to_numeric(stats[col], errors="coerce")
+    for c in numeric_cols:
+        if c in stats.columns:
+            stats[c] = pd.to_numeric(stats[c], errors="coerce")
 
     return stats
 
 # -------------------------------
-# LOAD SHOT DATA (BY ZONE)
+# LOAD SHOT DATA
 # -------------------------------
 @st.cache_data(show_spinner=True, ttl=CACHE_TTL_SECONDS)
 def load_shot_data(season: str) -> pd.DataFrame:
@@ -140,250 +133,88 @@ def load_shot_data(season: str) -> pd.DataFrame:
 
     df = nba_call_with_retries(_call)
 
-    # flatten any tuple / MultiIndex columns
-    flat_cols = []
-    for c in df.columns:
-        if isinstance(c, tuple):
-            flat_cols.append("_".join([str(x) for x in c if x]))
-        else:
-            flat_cols.append(str(c))
-    df.columns = flat_cols
+    df.columns = [
+        "_".join(c) if isinstance(c, tuple) else c
+        for c in df.columns
+    ]
 
-    # convert numeric FGM/FGA/FG_PCT columns
     for c in df.columns:
-        if "FGM" in c or "FGA" in c or "FG_PCT" in c:
+        if "FG" in c:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
     return df
 
 # -------------------------------
-# ZONE BREAKDOWN FOR ONE PLAYER
+# PLAYER ZONE BREAKDOWN
 # -------------------------------
 def get_zones_for_player(player_name: str, shots_all: pd.DataFrame) -> pd.DataFrame:
-    df = shots_all.copy()
-
-    if "PLAYER_NAME" not in df.columns:
-        return pd.DataFrame()
-
-    df = df[df["PLAYER_NAME"] == player_name]
+    df = shots_all[shots_all["PLAYER_NAME"] == player_name]
     if df.empty:
         return pd.DataFrame()
 
     row = df.iloc[0]
+    zones = {}
 
-    shot_cols = [
-        c for c in df.columns
-        if c.endswith("_FGM") or c.endswith("_FGA") or c.endswith("_FG_PCT")
-    ]
+    for col, val in row.items():
+        if not col.endswith(("FGM", "FGA", "FG_PCT")):
+            continue
 
-    zone_records = {}
+        zone = col.replace("_FGM", "").replace("_FGA", "").replace("_FG_PCT", "")
+        rec = zones.setdefault(zone, {"zone": zone, "FGM":0,"FGA":0,"FG_PCT":np.nan})
 
-    for col in shot_cols:
-        val = row[col]
+        if col.endswith("FGM") and pd.notna(val):
+            rec["FGM"] += val
+        elif col.endswith("FGA") and pd.notna(val):
+            rec["FGA"] += val
+        elif col.endswith("FG_PCT"):
+            rec["FG_PCT"] = val
 
-        if col.endswith("_FG_PCT"):
-            zone = col.replace("_FG_PCT", "")
-            metric = "FG_PCT"
-        elif col.endswith("_FGM"):
-            zone = col.replace("_FGM", "")
-            metric = "FGM"
-        else:  # _FGA
-            zone = col.replace("_FGA", "")
-            metric = "FGA"
+    zp = pd.DataFrame(zones.values())
+    zp = zp[zp["zone"] != "Backcourt"]
 
-        rec = zone_records.setdefault(zone, {
-            "zone": zone,
-            "FGM": 0.0,
-            "FGA": 0.0,
-            "FG_PCT": np.nan
-        })
-
-        if metric in ["FGM", "FGA"] and pd.notna(val):
-            rec[metric] += float(val)
-        elif metric == "FG_PCT" and pd.notna(val):
-            rec["FG_PCT"] = float(val)
-
-    zp = pd.DataFrame(zone_records.values())
-
-    # drop Backcourt
-    zp = zp[zp["zone"] != "Backcourt"].copy()
-
-    total_fga = zp["FGA"].sum()
-
-    zp["pts_val"] = np.where(zp["zone"].str.contains("3"), 3, 2)
-    zp["PTS"] = zp["FGM"] * zp["pts_val"]
-    zp["PTS_per_shot"] = np.where(zp["FGA"] > 0, zp["PTS"] / zp["FGA"], np.nan)
-    zp["Shot Share"] = np.where(total_fga > 0, zp["FGA"] / total_fga, np.nan)
+    zp["PTS"] = zp["FGM"] * np.where(zp["zone"].str.contains("3"),3,2)
+    zp["PTS/shot"] = zp["PTS"] / zp["FGA"]
+    zp["Shot Share"] = zp["FGA"] / zp["FGA"].sum()
 
     return zp
 
 # -------------------------------
-# LOAD DATA (FRESH PER TTL / REFRESH BUTTON)
+# LOAD DATA
 # -------------------------------
-try:
-    stats_all = load_main_stats(TARGET_SEASON)
-    shots_all = load_shot_data(TARGET_SEASON)
-except Exception as e:
-    st.error("NBA API failed to load. Try refresh, or wait a minute and try again.")
-    st.exception(e)
-    st.stop()
+stats_all = load_main_stats(TARGET_SEASON)
+shots_all = load_shot_data(TARGET_SEASON)
 
 # -------------------------------
-# SIDEBAR – TEAM & PLAYER SELECT
+# SIDEBAR FILTERS
 # -------------------------------
 teams = ["All"] + sorted(stats_all["TEAM_ABBREVIATION"].dropna().unique())
+team_sel = st.sidebar.selectbox("Team", teams)
 
-with st.sidebar:
-    st.markdown("### Filters")
-    team_sel = st.selectbox("Choose a team:", teams)
+players = stats_all[
+    stats_all["TEAM_ABBREVIATION"].eq(team_sel) | (team_sel == "All")
+]["PLAYER_NAME"].unique()
 
-    if team_sel != "All":
-        logo_url_sb = get_team_logo(team_sel)
-        if logo_url_sb:
-            st.image(logo_url_sb, width=70)
+player_sel = st.sidebar.selectbox("Player", sorted(players))
 
-    if team_sel == "All":
-        players = sorted(stats_all["PLAYER_NAME"].dropna().unique())
-    else:
-        players = sorted(
-            stats_all[stats_all["TEAM_ABBREVIATION"] == team_sel]["PLAYER_NAME"].dropna().unique()
-        )
-
-    player_sel = st.selectbox("Choose a player:", players)
-
-    st.markdown("---")
-    st.write("Stats: NBA.com Shooting General (Per Game)")
-    st.write("Zones: NBA.com Shooting Dashboard (By Zone)")
-    st.write(SEASON_LABEL)
-    st.caption(f"Auto-updates every {CACHE_TTL_SECONDS//60} min (or press Refresh).")
+player_row = stats_all[stats_all["PLAYER_NAME"]==player_sel].iloc[0]
 
 # -------------------------------
-# PLAYER HEADER
+# MAIN VIEW
 # -------------------------------
-if team_sel == "All":
-    p_rows = stats_all[stats_all["PLAYER_NAME"] == player_sel]
-else:
-    p_rows = stats_all[
-        (stats_all["PLAYER_NAME"] == player_sel) &
-        (stats_all["TEAM_ABBREVIATION"] == team_sel)
-    ]
-if p_rows.empty:
-    p_rows = stats_all[stats_all["PLAYER_NAME"] == player_sel]
+st.title("NBA Shooting – 2025‑26")
 
-player_row = p_rows.iloc[0]
+zones = get_zones_for_player(player_sel, shots_all)
 
-st.title("NBA Shooting – NBA.com 2025-26")
+styled = (
+    zones.style
+    .map(fg_color, subset=["FG_PCT"])
+    .format({
+        "FG_PCT": lambda v: f"{v*100:.0f}%",
+        "Shot Share": lambda v: f"{v*100:.0f}%",
+        "PTS": "{:.1f}",
+        "PTS/shot": "{:.2f}"
+    })
+)
 
-col1, col2 = st.columns([1, 4])
-
-with col1:
-    st.image(get_headshot(int(player_row["PLAYER_ID"])), width=170)
-    logo_url = get_team_logo(player_row["TEAM_ABBREVIATION"])
-    if logo_url:
-        st.image(logo_url, width=90)
-
-with col2:
-    st.subheader(f"{player_sel} ({player_row['TEAM_ABBREVIATION']}) – {SEASON_LABEL}")
-    st.write(
-        f"GP: **{int(player_row['GP'])}**  |  "
-        f"PTS: **{player_row['PTS']:.1f}** per game  |  "
-        f"FG%: **{player_row['FG_PCT']*100:.1f}%**  |  "
-        f"3P%: **{player_row['FG3_PCT']*100:.1f}%**  |  "
-        f"FT%: **{player_row['FT_PCT']*100:.1f}%**"
-    )
-    st.caption("FG% color bands: Red < 30%, Yellow 30–40%, Green > 40%")
-
-st.markdown("---")
-
-# -------------------------------
-# TABS
-# -------------------------------
-tab1, tab2 = st.tabs(["Zone breakdown", "Team overview"])
-
-# ----- TAB 1: ZONE BREAKDOWN -----
-with tab1:
-    zp = get_zones_for_player(player_sel, shots_all)
-
-    if zp.empty:
-        st.error("No zone data available for this player.")
-    else:
-        df_zone = zp.copy()
-
-        df_zone["Zone"] = (
-            df_zone["zone"]
-            .str.replace("_", " ", regex=False)
-            .str.replace("Non RA", "(Non-RA)", regex=False)
-        )
-
-        df_zone = df_zone[["Zone", "FGM", "FGA", "PTS_per_shot", "FG_PCT", "PTS", "Shot Share"]].copy()
-        df_zone.rename(columns={"PTS_per_shot": "PTS/shot", "FG_PCT": "FG%"}, inplace=True)
-
-        # add FT stats columns
-        df_zone["FTM"] = np.nan
-        df_zone["FTA"] = np.nan
-        df_zone["FT%"] = np.nan
-
-        ft_row = {
-            "Zone": "Free Throw",
-            "FGM": np.nan,
-            "FGA": np.nan,
-            "PTS/shot": np.nan,
-            "FG%": np.nan,
-            "PTS": np.nan,
-            "Shot Share": np.nan,
-            "FTM": player_row["FTM"],
-            "FTA": player_row["FTA"],
-            "FT%": player_row["FT_PCT"],
-        }
-        df_zone = pd.concat([df_zone, pd.DataFrame([ft_row])], ignore_index=True)
-
-        df_zone = df_zone[[
-            "Zone", "FGM", "FGA", "PTS/shot", "FG%", "PTS", "Shot Share",
-            "FTM", "FTA", "FT%"
-        ]]
-
-        styled = (
-            df_zone.style
-            .applymap(fg_color, subset=["FG%"])
-            .format({
-                "FGM": lambda v: "" if pd.isna(v) else f"{v:.1f}",
-                "FGA": lambda v: "" if pd.isna(v) else f"{v:.1f}",
-                "PTS/shot": lambda v: "" if pd.isna(v) else f"{v:.2f}",
-                "PTS": lambda v: "" if pd.isna(v) else f"{v:.1f}",
-                "FG%": lambda v: "" if pd.isna(v) else f"{int(round(v * 100))}%",
-                "Shot Share": lambda v: "" if pd.isna(v) else f"{int(round(v * 100))}%",
-                "FTM": lambda v: "" if pd.isna(v) else f"{v:.1f}",
-                "FTA": lambda v: "" if pd.isna(v) else f"{v:.1f}",
-                "FT%": lambda v: "" if pd.isna(v) else f"{int(round(v * 100))}%",
-            })
-        )
-
-        # Streamlit supports Styler in dataframe in most cases
-        st.dataframe(styled, use_container_width=True)
-
-# ----- TAB 2: TEAM OVERVIEW -----
-with tab2:
-    if team_sel == "All":
-        team_df = stats_all.copy()
-    else:
-        team_df = stats_all[stats_all["TEAM_ABBREVIATION"] == team_sel].copy()
-
-    team_df = team_df.sort_values("PTS", ascending=False)
-
-    df_out = team_df[[
-        "PLAYER_NAME", "TEAM_ABBREVIATION", "GP", "MIN", "PTS", "FG_PCT", "FG3_PCT", "FT_PCT"
-    ]].copy()
-
-    df_out["GP"] = df_out["GP"].astype("Int64")
-    df_out["MIN"] = df_out["MIN"].round(1)
-    df_out["PTS"] = df_out["PTS"].round(1)
-    df_out["FG%"] = (df_out["FG_PCT"] * 100).round(1)
-    df_out["3P%"] = (df_out["FG3_PCT"] * 100).round(1)
-    df_out["FT%"] = (df_out["FT_PCT"] * 100).round(1)
-
-    df_out.drop(columns=["FG_PCT", "FG3_PCT", "FT_PCT"], inplace=True)
-    df_out.rename(columns={"PLAYER_NAME": "Player", "TEAM_ABBREVIATION": "Team"}, inplace=True)
-
-    st.dataframe(df_out, use_container_width=True, hide_index=True)
-
-
+st.dataframe(styled, use_container_width=True)
+``
